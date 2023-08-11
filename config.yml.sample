@@ -1,0 +1,21 @@
+lemmy:
+  url: [LEMMY URL]
+  pg_host: [Postgres Host]
+  pg_port: [Postgres Port]
+  pg_db: lemmy # change if using a different db name
+
+credentials:
+  lemmy_user: [Bot User]
+  lemmy_pass: [Bot Password]
+  pg_user: [Postgres User]
+  pg_pass: [Postgres Password]
+
+subreddits:
+  # Put any subreddits here that you want posts AND comments
+  - amitheasshole
+  - tifu
+
+po_subreddits:
+  # Put any subreddits here that you want posts ONLY
+  - art
+  - memes
