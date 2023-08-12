@@ -92,6 +92,8 @@ def fix_comment_score(pg: psycopg2.connection, comment_data: dict, item: dict):
 
     score = item['data']['score']
     if score == 1:
+        # If the score is 1, then it doesn't need to be updated on Lemmy
+        # By default all comments on Lemmy have a score of 1
         logging.info(f"Comment {comment_data['comment_view']['comment']['id']} has a score of 1, skipping")
         return
     else:
@@ -114,6 +116,8 @@ def fix_post_score(pg: psycopg2.connection, post_data: dict, post: dict):
 
     score = post['score']
     if score == 1:
+        # If the score is 1, then it doesn't need to be updated on Lemmy
+        # By default all comments on Lemmy have a score of 1
         logging.info(f"Post {post_data['post_view']['post']['id']} has a score of 1, skipping")
     else:
         query = f"UPDATE post_aggregates SET score = {score} WHERE post_id = {post_data['post_view']['post']['id']};"
@@ -137,9 +141,12 @@ def parse_comments(pg: psycopg2.connection, lemmy: Lemmy, post_data: dict, data:
     """
     
     for item in data['data']['children']:
+        # Iterate over all the comments
         if (item['kind'] == 'more'):
+            # This comment type is for unloaded comments, should be ignored
             pass
         else:
+            # Copy over the comment, if it has a parent comment then the context should be preserved
             if (parent_comment):
                 try:
                     comment_data = lemmy.comment.create(post_data['post_view']['post']['id'], item['data']['body'], parent_id=parent_comment['comment_view']['comment']['id'])
@@ -155,6 +162,7 @@ def parse_comments(pg: psycopg2.connection, lemmy: Lemmy, post_data: dict, data:
                     with open(f"output/errors/{item['data']['id']}.json", 'w') as f:
                         f.write(json.dumps(item, indent=4))
 
+            # Copy over the score of the comment
             try:
                 fix_comment_score(pg, comment_data, item)
             except:
@@ -167,11 +175,12 @@ def parse_comments(pg: psycopg2.connection, lemmy: Lemmy, post_data: dict, data:
                 except:
                     logging.critical(f"Comment has no comment_data {item['data']['id']}")
             
+            # Loop through any replies to the comment to follow comment chains
             if (item['data']['replies'] != ""):
                 try:
                     parse_comments(pg, lemmy, post_data, item['data']['replies'], comment_data)
                 except:
-                    logging.error(f"Could not fix comment score {item['data']['id']}")
+                    logging.error(f"Could not handle comment reply {item['data']['id']}")
                     try:
                         with open(f"output/errors/{item['data']['id']}_score.json", 'w') as f:
                             f.write(json.dumps(comment_data, indent=4))
@@ -198,8 +207,8 @@ def copy_post(lemmy: Lemmy, pg: psycopg2.connection, permalink: str, comments: b
     comments -> whether to copy comments, defaults True
     """
     
-    data = get_json(permalink)
-    
+    # Receive Reddit API response and process it
+    data = get_json(permalink) 
     post = {
         'title': data[0]['data']['children'][0]['data']['title'],
         'url': data[0]['data']['children'][0]['data']['url'],
@@ -210,8 +219,11 @@ def copy_post(lemmy: Lemmy, pg: psycopg2.connection, permalink: str, comments: b
         'score': data[0]['data']['children'][0]['data']['score']
     }
 
+    # Find the ID of matching community name on Lemmy
     post['community_id'] = lemmy.community.get(name=post['subreddit'])['community_view']['community']['id']
 
+    # While loop is here to handle rate limits or other reasons for post copy failure
+    # Will attempt 5 times before skipping
     attempts = 0
     post_made = False
     while True:
@@ -230,6 +242,7 @@ def copy_post(lemmy: Lemmy, pg: psycopg2.connection, permalink: str, comments: b
             time.sleep(30)
             attempts += 1 
     
+    # Copy over comments if requested
     if (post_made):
         logging.info(f"Post Created: {post['title']}")
         if (comments):
@@ -241,25 +254,34 @@ def main():
     Sorts through what should and should not go to Lemmy
     """
 
+    # Load data and initialize connections
     config = load_yaml('config.yml')
     lemmy = lemmy_setup(config)
     pg = pg_setup(config)
     
+    # Loop through subreddits where we want comments
     for sub in config['subreddits']:
         posts = get_frontpage(f'/r/{sub}/')
         try:
             for post in posts['data']['children']:
                 if (post['data']['stickied'] == True):
+                    # Skip sticky posts
                     pass
                 else:
                     start = time.time()
                     copy_post(lemmy, pg, post['data']['permalink'])
                     end = time.time()
+
+                    # Want to make sure we stay under the Reddit rate limit
+                    # 10 per minute
+                    # Lemmy request times make this unnecessary, but is a precaution
                     if ((end - start) < 10):
                         time.sleep(10 - (end - start))
         except:
             try:
                 if (posts['reason'] == 'banned'):
+                    # Some subs would fail because they have been banned
+                    # Log the error and keep moving
                     logging.error(f"{sub} has been banned")
             except:
                 with open(f'output/errors/{sub}.json', 'w') as f:
@@ -267,21 +289,29 @@ def main():
         
         time.sleep(120)
     
+    # Loop through subreddits where we only want pictures/links
     for sub in config['po_subreddits']:
         posts = get_frontpage(f'/r/{sub}/')
         try:
             for post in posts['data']['children']:
                 if (post['data']['stickied'] == True):
+                    # Skip sticky posts
                     pass
                 else:
                     start = time.time()
                     copy_post(lemmy, pg, post['data']['permalink'], False)
                     end = time.time()
+
+                    # Want to make sure we stay under the Reddit rate limit
+                    # 10 per minute
+                    # Lemmy request times make this unnecessary, but is a precaution
                     if ((end - start) < 10):
                         time.sleep(10 - (end - start))
         except:
             try:
                 if (posts['reason'] == 'banned'):
+                    # Some subs would fail because they have been banned
+                    # Log the error and keep moving
                     logging.error(f"{sub} has been banned")
             except:
                 with open(f'output/errors/{sub}.json', 'w') as f:
