@@ -1,4 +1,4 @@
-# Reddit -> Post Converter
+# Reddit -> Lemmy Post Converter
 A Python script to pull posts from Reddit and upload them to Lemmy. (With or without comments)
 
 # Limitations

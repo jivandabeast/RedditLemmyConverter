@@ -3,15 +3,6 @@
 # Written By: Jivan RamjiSingh
 #
 
-#
-# TODO
-# - Fix post creation error (loop until fix?)
-# - Handle duplication
-# - Comment attribution
-# - Faster?
-# - Code documentation
-#
-
 import requests
 import logging
 import yaml
@@ -22,17 +13,29 @@ from pythorhead import Lemmy
 
 logging.basicConfig(filename='output/out.log', level=logging.ERROR, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-def load_yaml(file):
+def load_yaml(file: str):
+    """Load yaml file
+    file -> string location of the file to load
+    """
+
     with open(file, 'r') as f:
         data = yaml.safe_load(f)
     return data
 
-def lemmy_setup(config):
+def lemmy_setup(config: dict):
+    """Initialize and login to Lemmy
+    config -> config.yml dictionary 
+    """
+
     lemmy = Lemmy(config['lemmy']['url'])
     lemmy.log_in(config['credentials']['lemmy_user'], config['credentials']['lemmy_pass'])
     return lemmy
 
-def pg_setup(config):
+def pg_setup(config: dict):
+    """Initialize and connect to postgres
+    config -> config.yml dictionary
+    """
+
     pg = psycopg2.connect(
         database = config['lemmy']['pg_db'],
         host = config['lemmy']['pg_host'],
@@ -42,7 +45,11 @@ def pg_setup(config):
     )
     return pg
 
-def get_json(endpoint):
+def get_json(endpoint: str):
+    """Conduct the Reddit API request for a post
+    endpoint -> the api endpoint to hit
+    """
+
     headers = {
         'User-agent': 'RLC 0.1'
     }
@@ -50,7 +57,11 @@ def get_json(endpoint):
     response = requests.get(url, headers=headers)
     return response.json()
 
-def get_frontpage(subreddit):
+def get_frontpage(subreddit: str):
+    """Get the API response for a subreddit frontpage
+    subreddit -> subreddit to hit (i.e. /r/tifu/)
+    """
+
     headers = {
         'User-agent': 'RLC 0.1'
     }
@@ -59,7 +70,13 @@ def get_frontpage(subreddit):
     response = requests.get(url, headers=headers)
     return response.json()
 
-def fix_comment_score(pg, comment_data, item):
+def fix_comment_score(pg: psycopg2.connection, comment_data: dict, item: dict):
+    """Edit comment data in postgres to match score on Reddit
+    pg -> postgres db connection
+    comment_data -> comment data returned by pythorhead on creation
+    item -> comment data from Reddit API
+    """
+
     score = item['data']['score']
     if score == 1:
         logging.info(f"Comment {comment_data['comment_view']['comment']['id']} has a score of 1, skipping")
@@ -75,7 +92,13 @@ def fix_comment_score(pg, comment_data, item):
 
         logging.info(f"Fixed score for comment {comment_data['comment_view']['comment']['id']} to {score}")
 
-def fix_post_score(pg, post_data, post):
+def fix_post_score(pg: psycopg2.connection, post_data: dict, post: dict):
+    """Edit post data in postgres to match score on Reddit
+    pg -> postgres db connection
+    post_data -> post data returned by pythorhead on creation
+    post -> post data from Reddit API
+    """
+
     score = post['score']
     if score == 1:
         logging.info(f"Post {post_data['post_view']['post']['id']} has a score of 1, skipping")
@@ -91,7 +114,15 @@ def fix_post_score(pg, post_data, post):
         logging.info(f"Fixed score for post {post_data['post_view']['post']['id']} to {score}")
     pass
 
-def parse_comments(pg, lemmy, post_data, data, parent_comment=False):
+def parse_comments(pg: psycopg2.connection, lemmy: Lemmy, post_data: dict, data: dict, parent_comment: dict = {}):
+    """Parse through comments and create them on the Lemmy post
+    pg -> postgres db connection
+    lemmy -> Lemmy instance connection
+    post_data -> post data returned by pythorhead on creation
+    data -> comment data returned by Reddit API
+    parent_comment -> parent comment information, if applicable (defaults empty/false)
+    """
+    
     for item in data['data']['children']:
         if (item['kind'] == 'more'):
             pass
@@ -139,11 +170,21 @@ def parse_comments(pg, lemmy, post_data, data, parent_comment=False):
     return True
 
 def load_example_data():
+    """Load example data for testing purposes
+    """
+
     with open('output/example.json', 'r') as f:
         data = json.load(f)
     return data
 
-def copy_post(lemmy, pg, permalink, comments=True):
+def copy_post(lemmy: Lemmy, pg: psycopg2.connection, permalink: str, comments: bool = True):
+    """Copy post from Reddit to Lemmy
+    lemmy -> Lemmy instance connection
+    pg -> postgres db connection
+    permalink -> Reddit post permalink (i.e. /r/tifu/comments/xxx/xxx)
+    comments -> whether to copy comments, defaults True
+    """
+    
     data = get_json(permalink)
     
     post = {
@@ -181,45 +222,12 @@ def copy_post(lemmy, pg, permalink, comments=True):
         if (comments):
             comment_data = parse_comments(pg, lemmy, post_data, data[1])
 
-def test_func():
-    config = load_yaml('config.yml')
-    lemmy = lemmy_setup(config)
-    pg = pg_setup(config)
-    # data = get_json('/r/politics/comments/15lx8bh/trump_pushes_total_lie_about_georgia_prosecutor/')
-    data = load_example_data()
-    
-    post = {
-        'title': data[0]['data']['children'][0]['data']['title'],
-        'url': data[0]['data']['children'][0]['data']['url'],
-        'body': data[0]['data']['children'][0]['data']['selftext'],
-        'creator_id': data[0]['data']['children'][0]['data']['author'],
-        'subreddit': data[0]['data']['children'][0]['data']['subreddit'],
-        'nsfw': data[0]['data']['children'][0]['data']['over_18'],
-    }
-
-    # post['community_id'] = lemmy_request(f"community?name={post['subreddit']}")['community_view']['community']['id']
-    post['community_id'] = lemmy.community.get(name=post['subreddit'])['community_view']['community']['id']
-
-    post_data = lemmy.post.create(post['community_id'], post['title'], post['url'], f"{post['body']} \n\n Originally Posted on r/{post['subreddit']} by u/{post['creator_id']}", post['nsfw'])
-    logging.info("Post Created")
-    comment_data = parse_comments(pg, lemmy, post_data, data[1])
-    logging.info("Comments added")
-
-    with open('output/test/test_post_raw.json', 'w') as f:
-        f.write(json.dumps(data, indent=4))
-
-    with open('output/test/test_post.json', 'w') as f:
-        f.write(json.dumps(post, indent=4))
-
-    with open('output/test/post_data.json', 'w') as f:
-        f.write(json.dumps(post_data, indent=4))
-    
-    with open('output/test/comment_data.json', 'w') as f:
-        f.write(json.dumps(comment_data, indent=4))
-    
-    pg.close()
-
 def main():
+    """Main function
+    Gets the data from Reddit 
+    Sorts through what should and should not go to Lemmy
+    """
+    
     config = load_yaml('config.yml')
     lemmy = lemmy_setup(config)
     pg = pg_setup(config)
