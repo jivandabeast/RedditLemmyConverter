@@ -1,7 +1,20 @@
-#
-# Reddit Lemmy Converter
-# Written By: Jivan RamjiSingh
-#
+"""
+Reddit -> Lemmy Post Converter. Copies Reddit posts over to a Lemmy community.
+Copyright (C) 2023  Jivan RamjiSingh
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
 
 import requests
 import logging
@@ -227,7 +240,7 @@ def main():
     Gets the data from Reddit 
     Sorts through what should and should not go to Lemmy
     """
-    
+
     config = load_yaml('config.yml')
     lemmy = lemmy_setup(config)
     pg = pg_setup(config)
