@@ -24,13 +24,11 @@ For simplicity, the script searches the lemmy instance for a community that matc
 # TODO / Planning
 
 - Handle duplication
-  - Use of an sqlite db to map a Lemmy Post ID to a Reddit Post ID
-  - Will also map comment information
-  - Perform a lookup on the db to check if the post exists
-  - Update post with new information/comments
+  - Update posts/comments with new score and new comments
 - Comment attribution
   - Not sure of a "pretty" way to do this one
   - Using two bot accounts to differentiate OP comments
 - Faster?
   - Creating Lemmy posts/comments directly via postgres?
   - Batch post/comment addition?
+  - Create reddit api account?

@@ -153,7 +153,6 @@ def check_dupe(db: sqlite3.Connection, post: dict = {}, comment: dict = {}):
         logging.error(f"More than one result returned: {row_list}")
         return row_list[0]
     elif (len(row_list) == 1):
-        logging.info(f"Duplicate found for {post['title']}")
         return row_list[0]
     else:
         return []
@@ -169,6 +168,10 @@ def save_entry(db: sqlite3.Connection, comment_data: dict = {}, post_data: dict 
 
     db_cursor = db.cursor()
     if (comment_data and comment):
+        db_cursor.execute(f"""
+        INSERT INTO comments (reddit_comment_id, lemmy_comment_id, reddit_post_id, lemmy_post_id, comment_score)
+                          VALUES ('{comment['reddit_comment_id']}', '{comment['lemmy_comment_id']}', '{comment['reddit_post_id']}', '{comment['lemmy_post_id']}', {comment['comment_score']})
+        """)
         pass
     elif (post_data and post):
         db_cursor.execute(f"""
@@ -245,35 +248,59 @@ def parse_comments(pg: psycopg2.extensions.connection, lemmy: Lemmy, post_data: 
             # This comment type is for unloaded comments, should be ignored
             pass
         else:
-            # Copy over the comment, if it has a parent comment then the context should be preserved
-            if (parent_comment):
-                try:
-                    comment_data = lemmy.comment.create(post_data['post_view']['post']['id'], item['data']['body'], parent_id=parent_comment['comment_view']['comment']['id'])
-                except:
-                    logging.error(f"Could not push child comment {item['data']['id']}")
-                    with open(f"output/errors/{item['data']['id']}.json", 'w') as f:
-                        f.write(json.dumps(item, indent=4))
-            else:
-                try:
-                    comment_data = lemmy.comment.create(post_data['post_view']['post']['id'], item['data']['body'])
-                except:
-                    logging.error(f"Could not push comment {item['data']['id']}")
-                    with open(f"output/errors/{item['data']['id']}.json", 'w') as f:
-                        f.write(json.dumps(item, indent=4))
+            comment = {
+                'reddit_post_id': post['id'],
+                'reddit_comment_id': item['data']['id'],
+                'lemmy_post_id': post_data['post_view']['post']['id'],
+                'comment_score': item['data']['score']
+            }
 
-            # Copy over the score of the comment
-            try:
-                fix_comment_score(pg, comment_data, item)
-            except:
-                logging.error(f"Could not fix comment score {item['data']['id']}")
+            comment_data = {}
+            if (check_dupe(comment)):
+                pass
+            else:
+                # Copy over the comment, if it has a parent comment then the context should be preserved
+                if (parent_comment):
+                    try:
+                        comment_data = lemmy.comment.create(post_data['post_view']['post']['id'], item['data']['body'], parent_id=parent_comment['comment_view']['comment']['id'])
+                        comment['lemmy_comment_id'] = comment_data['comment_view']['comment']['id']
+                    except:
+                        logging.error(f"Could not push child comment {item['data']['id']}")
+                        with open(f"output/errors/{item['data']['id']}.json", 'w') as f:
+                            f.write(json.dumps(item, indent=4))
+                else:
+                    try:
+                        comment_data = lemmy.comment.create(post_data['post_view']['post']['id'], item['data']['body'])
+                        comment['lemmy_comment_id'] = comment_data['comment_view']['comment']['id']
+                    except:
+                        logging.error(f"Could not push comment {item['data']['id']}")
+                        with open(f"output/errors/{item['data']['id']}.json", 'w') as f:
+                            f.write(json.dumps(item, indent=4))
+
+                # Copy over the score of the comment
                 try:
-                    with open(f"output/errors/{item['data']['id']}_score.json", 'w') as f:
-                        f.write(json.dumps(comment_data, indent=4))
-                    with open(f"output/errors/{item['data']['id']}.json", 'w') as f:
-                        f.write(json.dumps(item, indent=4))
+                    fix_comment_score(pg, comment_data, item)
                 except:
-                    logging.critical(f"Comment has no comment_data {item['data']['id']}")
-            
+                    logging.error(f"Could not fix comment score {item['data']['id']}")
+                    try:
+                        with open(f"output/errors/{item['data']['id']}_score.json", 'w') as f:
+                            f.write(json.dumps(comment_data, indent=4))
+                        with open(f"output/errors/{item['data']['id']}.json", 'w') as f:
+                            f.write(json.dumps(item, indent=4))
+                    except:
+                        logging.critical(f"Comment has no comment_data {item['data']['id']}")
+                
+                # Save the comment information to sqlite3
+                try:
+                    save_entry(db, comment_data=comment_data, comment=comment)
+                except:
+                    logging.error(f"Could not save comment information to sqlite3")
+                    try:
+                        with open(f"output/errors/{comment['lemmy_comment_id']}.json", 'w') as f:
+                            f.write(json.dumps(comment, indent=4))
+                    except:
+                        logging.critical(f"Could not save comment error data")
+
             # Loop through any replies to the comment to follow comment chains
             if (item['data']['replies'] != ""):
                 try:
@@ -367,34 +394,34 @@ def main():
     db = load_db("rlc.db")
     
     # Loop through subreddits where we want comments
-    # for sub in config['subreddits']:
-    #     posts = get_frontpage(f'/r/{sub}/')
-    #     try:
-    #         for post in posts['data']['children']:
-    #             if (post['data']['stickied'] == True):
-    #                 # Skip sticky posts
-    #                 pass
-    #             else:
-    #                 start = time.time()
-    #                 copy_post(lemmy, pg, post['data']['permalink'], db)
-    #                 end = time.time()
+    for sub in config['subreddits']:
+        posts = get_frontpage(f'/r/{sub}/')
+        try:
+            for post in posts['data']['children']:
+                if (post['data']['stickied'] == True):
+                    # Skip sticky posts
+                    pass
+                else:
+                    start = time.time()
+                    copy_post(lemmy, pg, post['data']['permalink'], db)
+                    end = time.time()
 
-    #                 # Want to make sure we stay under the Reddit rate limit
-    #                 # 10 per minute
-    #                 # Lemmy request times make this unnecessary, but is a precaution
-    #                 if ((end - start) < 10):
-    #                     time.sleep(10 - (end - start))
-    #     except:
-    #         try:
-    #             if (posts['reason'] == 'banned'):
-    #                 # Some subs would fail because they have been banned
-    #                 # Log the error and keep moving
-    #                 logging.error(f"{sub} has been banned")
-    #         except:
-    #             with open(f'output/errors/{sub}.json', 'w') as f:
-    #                 f.write(json.dumps(posts, indent=4))
+                    # Want to make sure we stay under the Reddit rate limit
+                    # 10 per minute
+                    # Lemmy request times make this unnecessary, but is a precaution
+                    if ((end - start) < 10):
+                        time.sleep(10 - (end - start))
+        except:
+            try:
+                if (posts['reason'] == 'banned'):
+                    # Some subs would fail because they have been banned
+                    # Log the error and keep moving
+                    logging.error(f"{sub} has been banned")
+            except:
+                with open(f'output/errors/{sub}.json', 'w') as f:
+                    f.write(json.dumps(posts, indent=4))
         
-    #     time.sleep(120)
+        time.sleep(120)
     
     # Loop through subreddits where we only want pictures/links
     for sub in config['po_subreddits']:
