@@ -25,7 +25,7 @@ import time
 import sqlite3
 from pythorhead import Lemmy
 
-logging.basicConfig(filename='output/out.log', level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(filename='output/out.log', level=logging.ERROR, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 def load_yaml(file: str):
     """Load yaml file
@@ -134,7 +134,7 @@ def check_dupe(db: sqlite3.Connection, post: dict = {}, comment: dict = {}):
             }
             row_list.append(db_dict)
     elif (comment):
-        db_data = db_cursor.execute(f"SELECT reddit_post_id, lemmy_post_id, lemmy_comment_id, reddit_comment_id, comment_score FROM comments WHERE reddit_post_id='{comment['post_id']}' AND reddit_comment_id='{comment['id']}'").fetchall()
+        db_data = db_cursor.execute(f"SELECT reddit_post_id, lemmy_post_id, lemmy_comment_id, reddit_comment_id, comment_score FROM comments WHERE reddit_post_id='{comment['reddit_post_id']}' AND reddit_comment_id='{comment['reddit_comment_id']}'").fetchall()
         for row in db_data or []:
             db_dict = {
                 'reddit_post_id': row[0],
@@ -241,7 +241,7 @@ def parse_comments(pg: psycopg2.extensions.connection, lemmy: Lemmy, post_data: 
     post -> post information parsed from Reddit API
     parent_comment -> parent comment information, if applicable (defaults empty/false)
     """
-    
+
     for item in data['data']['children']:
         # Iterate over all the comments
         if (item['kind'] == 'more'):
@@ -256,50 +256,55 @@ def parse_comments(pg: psycopg2.extensions.connection, lemmy: Lemmy, post_data: 
             }
 
             comment_data = {}
-            if (check_dupe(comment)):
-                pass
+            if (check_dupe(db, comment=comment)):
+                logging.info(f"Duplicate comment found: {comment['reddit_comment_id']}")
             else:
+                comment_made = False
+
                 # Copy over the comment, if it has a parent comment then the context should be preserved
                 if (parent_comment):
                     try:
-                        comment_data = lemmy.comment.create(post_data['post_view']['post']['id'], item['data']['body'], parent_id=parent_comment['comment_view']['comment']['id'])
+                        comment_data = lemmy.comment.create(int(post_data['post_view']['post']['id']), item['data']['body'], parent_id=parent_comment['comment_view']['comment']['id'])
                         comment['lemmy_comment_id'] = comment_data['comment_view']['comment']['id']
+                        comment_made = True
                     except:
                         logging.error(f"Could not push child comment {item['data']['id']}")
                         with open(f"output/errors/{item['data']['id']}.json", 'w') as f:
                             f.write(json.dumps(item, indent=4))
                 else:
                     try:
-                        comment_data = lemmy.comment.create(post_data['post_view']['post']['id'], item['data']['body'])
+                        comment_data = lemmy.comment.create(int(post_data['post_view']['post']['id']), item['data']['body'])
                         comment['lemmy_comment_id'] = comment_data['comment_view']['comment']['id']
+                        comment_made = True
                     except:
                         logging.error(f"Could not push comment {item['data']['id']}")
                         with open(f"output/errors/{item['data']['id']}.json", 'w') as f:
                             f.write(json.dumps(item, indent=4))
 
-                # Copy over the score of the comment
-                try:
-                    fix_comment_score(pg, comment_data, item)
-                except:
-                    logging.error(f"Could not fix comment score {item['data']['id']}")
+                if (comment_made):
+                    # Copy over the score of the comment
                     try:
-                        with open(f"output/errors/{item['data']['id']}_score.json", 'w') as f:
-                            f.write(json.dumps(comment_data, indent=4))
-                        with open(f"output/errors/{item['data']['id']}.json", 'w') as f:
-                            f.write(json.dumps(item, indent=4))
+                        fix_comment_score(pg, comment_data, item)
                     except:
-                        logging.critical(f"Comment has no comment_data {item['data']['id']}")
-                
-                # Save the comment information to sqlite3
-                try:
-                    save_entry(db, comment_data=comment_data, comment=comment)
-                except:
-                    logging.error(f"Could not save comment information to sqlite3")
+                        logging.error(f"Could not fix comment score {item['data']['id']}")
+                        try:
+                            with open(f"output/errors/{item['data']['id']}_score.json", 'w') as f:
+                                f.write(json.dumps(comment_data, indent=4))
+                            with open(f"output/errors/{item['data']['id']}.json", 'w') as f:
+                                f.write(json.dumps(item, indent=4))
+                        except:
+                            logging.critical(f"Comment has no comment_data {item['data']['id']}")
+                    
+                    # Save the comment information to sqlite3
                     try:
-                        with open(f"output/errors/{comment['lemmy_comment_id']}.json", 'w') as f:
-                            f.write(json.dumps(comment, indent=4))
+                        save_entry(db, comment_data=comment_data, comment=comment)
                     except:
-                        logging.critical(f"Could not save comment error data")
+                        logging.error(f"Could not save comment information to sqlite3")
+                        try:
+                            with open(f"output/errors/{comment['lemmy_comment_id']}.json", 'w') as f:
+                                f.write(json.dumps(comment, indent=4))
+                        except:
+                            logging.critical(f"Could not save comment error data")
 
             # Loop through any replies to the comment to follow comment chains
             if (item['data']['replies'] != ""):
@@ -353,9 +358,16 @@ def copy_post(lemmy: Lemmy, pg: psycopg2.extensions.connection, permalink: str, 
     # Will attempt 5 times before skipping
     attempts = 0
     post_made = False
-    post_data = {}
-    if (check_dupe(db, post)):
-        pass
+    post_data = check_dupe(db, post=post)
+    if (post_data):
+        logging.info(f"Duplicate post found: {post['title']}")
+        post_data = {
+            'post_view': {
+                'post': {
+                    "id": post_data['lemmy_post_id']
+                }
+            }
+        }
     else:
         while True:
             try:
