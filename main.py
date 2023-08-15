@@ -22,9 +22,10 @@ import yaml
 import json
 import psycopg2
 import time
+import sqlite3
 from pythorhead import Lemmy
 
-logging.basicConfig(filename='output/out.log', level=logging.ERROR, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(filename='output/out.log', level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 def load_yaml(file: str):
     """Load yaml file
@@ -43,6 +44,36 @@ def lemmy_setup(config: dict):
     lemmy = Lemmy(config['lemmy']['url'])
     lemmy.log_in(config['credentials']['lemmy_user'], config['credentials']['lemmy_pass'])
     return lemmy
+
+def load_db(file: str):
+    """Load sqlite3 db connection
+    file -> string location of the sqlite3 db
+    """
+
+    # Create the DB connection and open cursor
+    db = sqlite3.connect(file)
+    sq_cursor = db.cursor()
+
+    # Check if the posts table is created, if not make it
+    try:
+        sq_cursor.execute("SELECT * FROM posts")
+        logging.debug(f"{file} table 'posts' exists")
+    except sqlite3.OperationalError:
+        sq_cursor.execute("CREATE TABLE posts(reddit_post_id text, lemmy_post_id text, post_score integer)")
+        db.commit()
+        logging.debug(f"{file} table 'posts' created")
+    
+    # Check if the comments table is created, if not make it
+    try:
+        sq_cursor.execute("SELECT * FROM comments")
+        logging.debug(f"{file} table 'comments' exists")
+    except sqlite3.OperationalError:
+        sq_cursor.execute("CREATE TABLE comments(reddit_comment_id text, lemmy_comment_id text, reddit_post_id text, lemmy_post_id text, comment_score integer)")
+        db.commit()
+        logging.debug(f"{file} table 'comments' created")
+    
+    sq_cursor.close()
+    return db
 
 def pg_setup(config: dict):
     """Initialize and connect to postgres
@@ -83,7 +114,74 @@ def get_frontpage(subreddit: str):
     response = requests.get(url, headers=headers)
     return response.json()
 
-def fix_comment_score(pg: psycopg2.connection, comment_data: dict, item: dict):
+def check_dupe(db: sqlite3.Connection, post: dict = {}, comment: dict = {}):
+    """Checks sqlite3 db for a duplicate post/comment based on reddit post/comment id
+    Only post OR comment should be passed, not both at once
+    db -> sqlite3 db connection
+    post -> post data dict (defaults empty/false)
+    comment -> comment data dict (defaults empty/false)
+    """
+
+    db_cursor = db.cursor()
+    row_list = []
+    if (post):
+        db_data = db_cursor.execute(f"SELECT reddit_post_id, lemmy_post_id, post_score FROM posts WHERE reddit_post_id='{post['id']}'").fetchall()
+        for row in db_data or []:
+            db_dict = {
+                'reddit_post_id': row[0],
+                'lemmy_post_id': row[1],
+                'post_score': row[2]
+            }
+            row_list.append(db_dict)
+    elif (comment):
+        db_data = db_cursor.execute(f"SELECT reddit_post_id, lemmy_post_id, lemmy_comment_id, reddit_comment_id, comment_score FROM comments WHERE reddit_post_id='{comment['post_id']}' AND reddit_comment_id='{comment['id']}'").fetchall()
+        for row in db_data or []:
+            db_dict = {
+                'reddit_post_id': row[0],
+                'lemmy_post_id': row[1],
+                'lemmy_comment_id': row[2],
+                'reddit_comment_id': row[3],
+                'comment_score': row[4]
+            }
+            row_list.append(db_dict)
+    else:
+        logging.error(f"check_dupe called but no data was passed.")
+    
+    db_cursor.close()
+
+    if (len(row_list) > 1):
+        logging.error(f"More than one result returned: {row_list}")
+        return row_list[0]
+    elif (len(row_list) == 1):
+        logging.info(f"Duplicate found for {post['title']}")
+        return row_list[0]
+    else:
+        return []
+
+def save_entry(db: sqlite3.Connection, comment_data: dict = {}, post_data: dict = {}, comment: dict = {}, post: dict = {}):
+    """Save post/comment information to sqlite3
+    db -> sqlite3 db connection
+    comment_data -> comment data from Lemmy
+    post_data -> post data from Lemmy
+    comment -> comment information parsed from Reddit API
+    post -> post information parsed from Reddit API
+    """
+
+    db_cursor = db.cursor()
+    if (comment_data and comment):
+        pass
+    elif (post_data and post):
+        db_cursor.execute(f"""
+        INSERT INTO posts (reddit_post_id, lemmy_post_id, post_score)
+                          VALUES ('{post['id']}', '{post_data['post_view']['post']['id']}', {post['score']})
+        """)
+    else: 
+        logging.error('save_entry called incorrectly')
+
+    db.commit()
+    db_cursor.close()
+
+def fix_comment_score(pg: psycopg2.extensions.connection, comment_data: dict, item: dict):
     """Edit comment data in postgres to match score on Reddit
     pg -> postgres db connection
     comment_data -> comment data returned by pythorhead on creation
@@ -107,7 +205,7 @@ def fix_comment_score(pg: psycopg2.connection, comment_data: dict, item: dict):
 
         logging.info(f"Fixed score for comment {comment_data['comment_view']['comment']['id']} to {score}")
 
-def fix_post_score(pg: psycopg2.connection, post_data: dict, post: dict):
+def fix_post_score(pg: psycopg2.extensions.connection, post_data: dict, post: dict):
     """Edit post data in postgres to match score on Reddit
     pg -> postgres db connection
     post_data -> post data returned by pythorhead on creation
@@ -131,12 +229,13 @@ def fix_post_score(pg: psycopg2.connection, post_data: dict, post: dict):
         logging.info(f"Fixed score for post {post_data['post_view']['post']['id']} to {score}")
     pass
 
-def parse_comments(pg: psycopg2.connection, lemmy: Lemmy, post_data: dict, data: dict, parent_comment: dict = {}):
+def parse_comments(pg: psycopg2.extensions.connection, lemmy: Lemmy, post_data: dict, data: dict, post: dict, db: sqlite3.Connection, parent_comment: dict = {}):
     """Parse through comments and create them on the Lemmy post
     pg -> postgres db connection
     lemmy -> Lemmy instance connection
     post_data -> post data returned by pythorhead on creation
     data -> comment data returned by Reddit API
+    post -> post information parsed from Reddit API
     parent_comment -> parent comment information, if applicable (defaults empty/false)
     """
     
@@ -178,7 +277,7 @@ def parse_comments(pg: psycopg2.connection, lemmy: Lemmy, post_data: dict, data:
             # Loop through any replies to the comment to follow comment chains
             if (item['data']['replies'] != ""):
                 try:
-                    parse_comments(pg, lemmy, post_data, item['data']['replies'], comment_data)
+                    parse_comments(pg, lemmy, post_data, item['data']['replies'], post, db, comment_data)
                 except:
                     logging.error(f"Could not handle comment reply {item['data']['id']}")
                     try:
@@ -199,7 +298,7 @@ def load_example_data():
         data = json.load(f)
     return data
 
-def copy_post(lemmy: Lemmy, pg: psycopg2.connection, permalink: str, comments: bool = True):
+def copy_post(lemmy: Lemmy, pg: psycopg2.extensions.connection, permalink: str, db: sqlite3.Connection, comments: bool = True):
     """Copy post from Reddit to Lemmy
     lemmy -> Lemmy instance connection
     pg -> postgres db connection
@@ -216,7 +315,8 @@ def copy_post(lemmy: Lemmy, pg: psycopg2.connection, permalink: str, comments: b
         'creator_id': data[0]['data']['children'][0]['data']['author'],
         'subreddit': data[0]['data']['children'][0]['data']['subreddit'],
         'nsfw': data[0]['data']['children'][0]['data']['over_18'],
-        'score': data[0]['data']['children'][0]['data']['score']
+        'score': data[0]['data']['children'][0]['data']['score'],
+        'id': data[0]['data']['children'][0]['data']['id']
     }
 
     # Find the ID of matching community name on Lemmy
@@ -226,27 +326,33 @@ def copy_post(lemmy: Lemmy, pg: psycopg2.connection, permalink: str, comments: b
     # Will attempt 5 times before skipping
     attempts = 0
     post_made = False
-    while True:
-        try:
-            post_data = lemmy.post.create(post['community_id'], post['title'], post['url'], f"{post['body']} \n\n Originally Posted on r/{post['subreddit']} by u/{post['creator_id']}", post['nsfw'])
-            fix_post_score(pg, post_data, post)
-            post_made = True
-            break
-        except:
-            if (attempts == 5):
-                logging.critical(f'Post could not be copied, skipping')
-                logging.critical(post)
-                post_made = False
+    post_data = {}
+    if (check_dupe(db, post)):
+        pass
+    else:
+        while True:
+            try:
+                post_data = lemmy.post.create(post['community_id'], post['title'], post['url'], f"{post['body']} \n\n Originally Posted on r/{post['subreddit']} by u/{post['creator_id']}", post['nsfw'])
+                fix_post_score(pg, post_data, post)
+                post_made = True
                 break
-            logging.warning(f'Something went wrong, retrying {attempts}')
-            time.sleep(30)
-            attempts += 1 
+            except:
+                if (attempts == 5):
+                    logging.critical(f'Post could not be copied, skipping')
+                    logging.critical(post)
+                    post_made = False
+                    break
+                logging.warning(f'Something went wrong, retrying {attempts}')
+                time.sleep(30)
+                attempts += 1 
     
-    # Copy over comments if requested
     if (post_made):
         logging.info(f"Post Created: {post['title']}")
-        if (comments):
-            comment_data = parse_comments(pg, lemmy, post_data, data[1])
+        save_entry(db, post_data=post_data, post=post)
+
+    # Copy over comments if requested
+    if (comments):
+        comment_data = parse_comments(pg, lemmy, post_data, data[1], post, db)
 
 def main():
     """Main function
@@ -258,36 +364,37 @@ def main():
     config = load_yaml('config.yml')
     lemmy = lemmy_setup(config)
     pg = pg_setup(config)
+    db = load_db("rlc.db")
     
     # Loop through subreddits where we want comments
-    for sub in config['subreddits']:
-        posts = get_frontpage(f'/r/{sub}/')
-        try:
-            for post in posts['data']['children']:
-                if (post['data']['stickied'] == True):
-                    # Skip sticky posts
-                    pass
-                else:
-                    start = time.time()
-                    copy_post(lemmy, pg, post['data']['permalink'])
-                    end = time.time()
+    # for sub in config['subreddits']:
+    #     posts = get_frontpage(f'/r/{sub}/')
+    #     try:
+    #         for post in posts['data']['children']:
+    #             if (post['data']['stickied'] == True):
+    #                 # Skip sticky posts
+    #                 pass
+    #             else:
+    #                 start = time.time()
+    #                 copy_post(lemmy, pg, post['data']['permalink'], db)
+    #                 end = time.time()
 
-                    # Want to make sure we stay under the Reddit rate limit
-                    # 10 per minute
-                    # Lemmy request times make this unnecessary, but is a precaution
-                    if ((end - start) < 10):
-                        time.sleep(10 - (end - start))
-        except:
-            try:
-                if (posts['reason'] == 'banned'):
-                    # Some subs would fail because they have been banned
-                    # Log the error and keep moving
-                    logging.error(f"{sub} has been banned")
-            except:
-                with open(f'output/errors/{sub}.json', 'w') as f:
-                    f.write(json.dumps(posts, indent=4))
+    #                 # Want to make sure we stay under the Reddit rate limit
+    #                 # 10 per minute
+    #                 # Lemmy request times make this unnecessary, but is a precaution
+    #                 if ((end - start) < 10):
+    #                     time.sleep(10 - (end - start))
+    #     except:
+    #         try:
+    #             if (posts['reason'] == 'banned'):
+    #                 # Some subs would fail because they have been banned
+    #                 # Log the error and keep moving
+    #                 logging.error(f"{sub} has been banned")
+    #         except:
+    #             with open(f'output/errors/{sub}.json', 'w') as f:
+    #                 f.write(json.dumps(posts, indent=4))
         
-        time.sleep(120)
+    #     time.sleep(120)
     
     # Loop through subreddits where we only want pictures/links
     for sub in config['po_subreddits']:
@@ -299,7 +406,7 @@ def main():
                     pass
                 else:
                     start = time.time()
-                    copy_post(lemmy, pg, post['data']['permalink'], False)
+                    copy_post(lemmy, pg, post['data']['permalink'], db, False)
                     end = time.time()
 
                     # Want to make sure we stay under the Reddit rate limit
@@ -319,8 +426,9 @@ def main():
 
         time.sleep(120)
 
+    db.commit()
+    db.close()
     pg.close()
         
-
 if __name__ == '__main__':
     main()
