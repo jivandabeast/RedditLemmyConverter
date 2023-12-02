@@ -23,8 +23,6 @@ For simplicity, the script searches the lemmy instance for a community that matc
 
 # TODO / Planning
 
-- Handle duplication
-  - Update posts/comments with new score and new comments
 - Comment attribution
   - Not sure of a "pretty" way to do this one
   - Using two bot accounts to differentiate OP comments
