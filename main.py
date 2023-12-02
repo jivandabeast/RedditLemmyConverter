@@ -24,6 +24,7 @@ import psycopg2
 import time
 import sqlite3
 from pythorhead import Lemmy
+from alive_progress import alive_bar
 
 logging.basicConfig(filename='output/out.log', level=logging.ERROR, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
@@ -59,7 +60,7 @@ def load_db(file: str):
         sq_cursor.execute("SELECT * FROM posts")
         logging.debug(f"{file} table 'posts' exists")
     except sqlite3.OperationalError:
-        sq_cursor.execute("CREATE TABLE posts(reddit_post_id text, lemmy_post_id text, post_score integer)")
+        sq_cursor.execute("CREATE TABLE posts(reddit_post_id text, lemmy_post_id text, post_score integer, post_hash text)")
         db.commit()
         logging.debug(f"{file} table 'posts' created")
     
@@ -68,7 +69,7 @@ def load_db(file: str):
         sq_cursor.execute("SELECT * FROM comments")
         logging.debug(f"{file} table 'comments' exists")
     except sqlite3.OperationalError:
-        sq_cursor.execute("CREATE TABLE comments(reddit_comment_id text, lemmy_comment_id text, reddit_post_id text, lemmy_post_id text, comment_score integer)")
+        sq_cursor.execute("CREATE TABLE comments(reddit_comment_id text, lemmy_comment_id text, reddit_post_id text, lemmy_post_id text, comment_score integer, comment_hash text)")
         db.commit()
         logging.debug(f"{file} table 'comments' created")
     
@@ -409,20 +410,22 @@ def main():
     for sub in config['subreddits']:
         posts = get_frontpage(f'/r/{sub}/')
         try:
-            for post in posts['data']['children']:
-                if (post['data']['stickied'] == True):
-                    # Skip sticky posts
-                    pass
-                else:
-                    start = time.time()
-                    copy_post(lemmy, pg, post['data']['permalink'], db)
-                    end = time.time()
+            with alive_bar(len(posts['data']['children'])) as bar:
+                for post in posts['data']['children']:
+                    if (post['data']['stickied'] == True):
+                        # Skip sticky posts
+                        pass
+                    else:
+                        start = time.time()
+                        copy_post(lemmy, pg, post['data']['permalink'], db)
+                        end = time.time()
 
-                    # Want to make sure we stay under the Reddit rate limit
-                    # 10 per minute
-                    # Lemmy request times make this unnecessary, but is a precaution
-                    if ((end - start) < 10):
-                        time.sleep(10 - (end - start))
+                        # Want to make sure we stay under the Reddit rate limit
+                        # 10 per minute
+                        # Lemmy request times make this unnecessary, but is a precaution
+                        if ((end - start) < 10):
+                            time.sleep(10 - (end - start))
+                    bar()
         except:
             try:
                 if (posts['reason'] == 'banned'):
@@ -439,20 +442,22 @@ def main():
     for sub in config['po_subreddits']:
         posts = get_frontpage(f'/r/{sub}/')
         try:
-            for post in posts['data']['children']:
-                if (post['data']['stickied'] == True):
-                    # Skip sticky posts
-                    pass
-                else:
-                    start = time.time()
-                    copy_post(lemmy, pg, post['data']['permalink'], db, False)
-                    end = time.time()
+            with alive_bar(len(posts['data']['children'])) as bar:
+                for post in posts['data']['children']:
+                    if (post['data']['stickied'] == True):
+                        # Skip sticky posts
+                        pass
+                    else:
+                        start = time.time()
+                        copy_post(lemmy, pg, post['data']['permalink'], db, False)
+                        end = time.time()
 
-                    # Want to make sure we stay under the Reddit rate limit
-                    # 10 per minute
-                    # Lemmy request times make this unnecessary, but is a precaution
-                    if ((end - start) < 10):
-                        time.sleep(10 - (end - start))
+                        # Want to make sure we stay under the Reddit rate limit
+                        # 10 per minute
+                        # Lemmy request times make this unnecessary, but is a precaution
+                        if ((end - start) < 10):
+                            time.sleep(10 - (end - start))
+                    bar()
         except:
             try:
                 if (posts['reason'] == 'banned'):

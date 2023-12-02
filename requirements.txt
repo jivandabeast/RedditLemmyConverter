@@ -1,5 +1,8 @@
+about-time==4.2.1
+alive-progress==3.1.4
 certifi==2023.7.22
 charset-normalizer==3.2.0
+grapheme==0.6.0
 idna==3.4
 psycopg2-binary==2.9.7
 pythorhead==0.15.5
